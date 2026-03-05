@@ -1,0 +1,11 @@
+# OTel SDK and auto-instrumentation for Python
+# pin versions to avoid surprises
+opentelemetry-api==1.23.0
+opentelemetry-sdk==1.23.0
+opentelemetry-exporter-otlp-proto-grpc==1.23.0
+opentelemetry-instrumentation-grpc==0.44b0
+opentelemetry-propagator-b3==1.23.0
+
+# these are already in the original requirements, listed here for completeness
+grpcio==1.60.0
+google-cloud-profiler==4.1.0

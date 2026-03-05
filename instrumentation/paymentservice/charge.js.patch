@@ -1,0 +1,189 @@
+/**
+ * Payment Service — Custom Instrumentation Patches
+ * ==================================================
+ *
+ * Apply these changes to: microservices-demo/src/paymentservice/charge.js
+ *
+ * The auto-instrumentation from tracing.js handles gRPC spans automatically.
+ * This file adds CUSTOM spans and metrics for business logic that the
+ * auto-instrumentor can't see inside of.
+ *
+ * WHAT THIS ADDS:
+ * - Custom span: validate-credit-card (around card number validation)
+ * - Custom span: process-payment-transaction (around the charge logic)
+ * - Custom attributes: payment.amount, payment.currency, payment.card_type
+ * - Custom metric: payment_transactions_total counter (success vs failure)
+ * - Error recording with proper status codes and exception details
+ */
+
+"use strict";
+
+const opentelemetry = require("@opentelemetry/api");
+
+// get a tracer and meter scoped to this module
+const tracer = opentelemetry.trace.getTracer("paymentservice", "1.0.0");
+const meter = opentelemetry.metrics.getMeter("paymentservice", "1.0.0");
+
+// custom metric: count every payment attempt, labeled by outcome
+// this lets us build a success/failure rate chart in Kibana
+const paymentCounter = meter.createCounter("payment_transactions_total", {
+  description: "Total payment transactions processed",
+  unit: "1",
+});
+
+/**
+ * Detect card type from the number prefix.
+ * Used as a span attribute for filtering in Kibana.
+ */
+function getCardType(cardNumber) {
+  const num = cardNumber.replace(/\s/g, "");
+  if (num.startsWith("4")) return "visa";
+  if (num.startsWith("5")) return "mastercard";
+  if (num.startsWith("3")) return "amex";
+  if (num.startsWith("6")) return "discover";
+  return "unknown";
+}
+
+/**
+ * Validates the credit card details.
+ * Wrapped in a custom span so we can see validation time in traces.
+ */
+function validateCard(request) {
+  // start a custom span — this appears as a child of the gRPC handler span
+  return tracer.startActiveSpan("validate-credit-card", (span) => {
+    try {
+      const { credit_card_number, credit_card_expiration_year, credit_card_expiration_month, credit_card_cvv } =
+        request.credit_card;
+
+      // add business context as span attributes
+      // these show up in Kibana APM under the span's metadata tab
+      span.setAttribute("payment.card_type", getCardType(credit_card_number));
+      span.setAttribute(
+        "payment.card_last_four",
+        credit_card_number.slice(-4)
+      );
+
+      // basic validation
+      if (!credit_card_number || credit_card_number.length < 13) {
+        const err = new Error("Invalid credit card number");
+        span.recordException(err);
+        span.setStatus({
+          code: opentelemetry.SpanStatusCode.ERROR,
+          message: "Card validation failed: invalid number",
+        });
+        span.end();
+        throw err;
+      }
+
+      const now = new Date();
+      if (
+        credit_card_expiration_year < now.getFullYear() ||
+        (credit_card_expiration_year === now.getFullYear() &&
+          credit_card_expiration_month < now.getMonth() + 1)
+      ) {
+        const err = new Error("Credit card expired");
+        span.recordException(err);
+        span.setStatus({
+          code: opentelemetry.SpanStatusCode.ERROR,
+          message: "Card validation failed: expired",
+        });
+        span.end();
+        throw err;
+      }
+
+      if (!credit_card_cvv || credit_card_cvv.toString().length < 3) {
+        const err = new Error("Invalid CVV");
+        span.recordException(err);
+        span.setStatus({
+          code: opentelemetry.SpanStatusCode.ERROR,
+          message: "Card validation failed: invalid CVV",
+        });
+        span.end();
+        throw err;
+      }
+
+      span.setStatus({ code: opentelemetry.SpanStatusCode.OK });
+      span.addEvent("card-validated", {
+        "card.type": getCardType(credit_card_number),
+      });
+      span.end();
+      return true;
+    } catch (err) {
+      // make sure span ends even on unexpected errors
+      if (span.isRecording()) {
+        span.recordException(err);
+        span.end();
+      }
+      throw err;
+    }
+  });
+}
+
+/**
+ * Main charge function — processes the payment.
+ * Wrapped in a custom span with full business context.
+ */
+function charge(request) {
+  return tracer.startActiveSpan("process-payment-transaction", (span) => {
+    try {
+      const amount = request.amount;
+
+      // add business context — these are the attributes the assessment asks for
+      span.setAttribute("payment.amount", parseFloat(`${amount.units}.${amount.nanos}`));
+      span.setAttribute("payment.currency", amount.currency_code);
+      span.setAttribute("payment.card_type", getCardType(request.credit_card.credit_card_number));
+
+      // step 1: validate the card
+      validateCard(request);
+
+      // step 2: process the charge
+      // (the Online Boutique payment service is a mock — it always succeeds)
+      // in a real system this would call Stripe/Adyen/etc.
+      const transactionId = generateTransactionId();
+
+      span.setAttribute("payment.transaction_id", transactionId);
+      span.addEvent("payment-processed", {
+        "transaction.id": transactionId,
+        "amount": `${amount.units}.${amount.nanos} ${amount.currency_code}`,
+      });
+
+      // record success metric
+      paymentCounter.add(1, {
+        "payment.status": "success",
+        "payment.currency": amount.currency_code,
+        "payment.card_type": getCardType(request.credit_card.credit_card_number),
+      });
+
+      span.setStatus({ code: opentelemetry.SpanStatusCode.OK });
+      span.end();
+
+      return { transaction_id: transactionId };
+    } catch (err) {
+      // record failure metric
+      paymentCounter.add(1, {
+        "payment.status": "failure",
+        "payment.currency": request.amount?.currency_code || "unknown",
+        "payment.error": err.message,
+      });
+
+      span.recordException(err);
+      span.setStatus({
+        code: opentelemetry.SpanStatusCode.ERROR,
+        message: err.message,
+      });
+      span.end();
+      throw err;
+    }
+  });
+}
+
+/**
+ * Generate a fake transaction ID (same as original implementation).
+ */
+function generateTransactionId() {
+  return [...Array(32)]
+    .map(() => Math.floor(Math.random() * 16).toString(16))
+    .join("");
+}
+
+module.exports = { charge };

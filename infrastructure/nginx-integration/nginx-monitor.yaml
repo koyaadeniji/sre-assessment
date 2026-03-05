@@ -1,0 +1,38 @@
+# NGINX Ingress Controller Monitoring
+#
+# Add via: Kibana → Fleet → Agent Policies → Add Integration → Nginx
+#
+# Metrics endpoint:
+#   http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:10254/metrics
+#
+# Alternatively, OTel Collector can scrape this with the Prometheus receiver,
+# or use standalone Metricbeat config below.
+
+metricbeat.modules:
+  - module: nginx
+    enabled: true
+    metricsets: [stubstatus]
+    hosts: ["http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:10254"]
+    period: 10s
+
+# --- Structured JSON access logs ---
+# Update the NGINX Ingress ConfigMap to output JSON logs:
+#
+# controller.config.log-format-upstream: |
+#   {"timestamp":"$time_iso8601","remote_addr":"$remote_addr",
+#    "request_method":"$request_method","request_uri":"$request_uri",
+#    "status":$status,"body_bytes_sent":$body_bytes_sent,
+#    "request_time":$request_time,"upstream_response_time":"$upstream_response_time",
+#    "upstream_addr":"$upstream_addr","http_host":"$host",
+#    "upstream_status":"$upstream_status","service_name":"$service_name",
+#    "namespace":"$namespace"}
+# controller.config.log-format-escape-json: "true"
+
+# Elastic Agent picks up container logs automatically via the Kubernetes
+# integration. The JSON format makes fields queryable in Discover.
+
+# Correlating LB vs backend latency in Kibana:
+#   Lens → Line chart, dual series:
+#     1. Average nginx.request_time from logs-nginx.access-* (total request time including LB)
+#     2. Average transaction.duration.us from traces-apm-* filtered by service (backend only)
+#   If nginx time >> backend time, the bottleneck is at the LB layer.

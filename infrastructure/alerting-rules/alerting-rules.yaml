@@ -1,0 +1,297 @@
+# =================================================================
+# Kibana Alerting Rules
+# =================================================================
+#
+# These rules are configured in Kibana → Observability → Rules.
+# This file documents each rule and the rationale behind its thresholds.
+#
+# In practice, you create these in the Kibana UI and export them as
+# NDJSON saved objects (included in dashboards/ directory).
+#
+# All rules use the "Log threshold" or "Metric threshold" rule types
+# and are configured to post to a webhook connector for notifications.
+# =================================================================
+
+# ========================================
+# Section 3.1 — VM/Compute Monitoring
+# ========================================
+
+rules:
+
+  # --- Rule 1: High CPU (sustained) ---
+  - name: "High CPU Utilization"
+    type: metrics.alert.threshold
+    description: >
+      Fires when any node's CPU usage exceeds 85% for 5 continuous minutes.
+      Sustained high CPU usually means either a runaway process or the node
+      needs to be scaled up. Brief spikes are normal and ignored.
+    condition:
+      metric: system.cpu.total.norm.pct
+      comparator: ">"
+      threshold: 0.85
+      timeSize: 5
+      timeUnit: m
+      aggType: avg
+    group_by: host.name
+    actions:
+      - connector: webhook
+        message: |
+          🔴 High CPU on {{ context.host.name }}
+          Current: {{ context.value }}%
+          Duration: 5+ minutes
+          Check: kubectl top nodes
+
+  # --- Rule 2: Disk Space Critical ---
+  - name: "Disk Space Critical"
+    type: metrics.alert.threshold
+    description: >
+      Fires when filesystem free space drops below 10%.
+      At this level, you're one big log file away from a node going offline.
+      Pods get evicted by kubelet at around 10-15% (imagefs.available threshold).
+    condition:
+      metric: system.filesystem.used.pct
+      comparator: ">"
+      threshold: 0.90  # >90% used = <10% free
+      timeSize: 1
+      timeUnit: m
+      aggType: avg
+    filter: "system.filesystem.mount_point: /"
+    group_by: host.name
+    actions:
+      - connector: webhook
+        message: |
+          🔴 Disk space critical on {{ context.host.name }}
+          Used: {{ context.value }}%
+          Free: < 10%
+          Action: Check large files with `du -sh /var/log/*` and clean up
+
+  # --- Rule 3: Memory Pressure ---
+  - name: "Memory Pressure - Low Available"
+    type: metrics.alert.threshold
+    description: >
+      Fires when available memory drops below 500MB.
+      This is the point where OOM killer starts eyeing your processes.
+      Available = free + buffers + cached (what the OS can reclaim).
+    condition:
+      metric: system.memory.actual.free
+      comparator: "<"
+      threshold: 524288000  # 500MB in bytes
+      timeSize: 2
+      timeUnit: m
+      aggType: avg
+    group_by: host.name
+    actions:
+      - connector: webhook
+        message: |
+          🔴 Low memory on {{ context.host.name }}
+          Available: {{ context.value }} bytes
+          Threshold: 500MB
+          Action: Check top consumers with `kubectl top pods --sort-by=memory`
+
+  # ========================================
+  # Section 3.2 — PostgreSQL Alerts
+  # ========================================
+
+  # --- Rule 4: Connection Pool Exhaustion ---
+  - name: "PostgreSQL Connection Pool > 80%"
+    type: metrics.alert.threshold
+    description: >
+      Fires when active connections exceed 80% of max_connections.
+      PostgreSQL default max_connections is 100. At 80% we need to
+      investigate — are connections leaking? Do we need pgbouncer?
+      At 100% new connections are rejected and the app starts failing.
+    condition:
+      metric: postgresql.activity.database.stats.active
+      comparator: ">"
+      threshold: 80  # 80% of max_connections
+      timeSize: 2
+      timeUnit: m
+      aggType: max
+    actions:
+      - connector: webhook
+        message: |
+          🟡 PostgreSQL connections high
+          Active: {{ context.value }}
+          Threshold: 80% of max_connections
+          Check: SELECT count(*) FROM pg_stat_activity WHERE state = 'active';
+
+  # --- Rule 5: Cache Hit Ratio Degradation ---
+  - name: "PostgreSQL Cache Hit Ratio < 95%"
+    type: custom.threshold
+    description: >
+      Fires when the shared buffer cache hit ratio drops below 95%.
+      This means PostgreSQL is reading from disk more than it should.
+      Healthy databases should have >99% cache hit ratio.
+      Below 95% usually means shared_buffers is undersized or the
+      working set has grown beyond memory.
+    kql_query: >
+      postgresql.database.stats.cache_hit_ratio < 0.95
+    timeSize: 5
+    timeUnit: m
+    actions:
+      - connector: webhook
+        message: |
+          🟡 PostgreSQL cache hit ratio degraded
+          Current: {{ context.value }}
+          Threshold: 95%
+          Investigate: Check shared_buffers size and working set growth
+
+  # ========================================
+  # Section 3.2 — Redis Alerts
+  # ========================================
+
+  # --- Rule 6: Redis Memory Near Max ---
+  - name: "Redis Memory > 85% of maxmemory"
+    type: metrics.alert.threshold
+    description: >
+      Fires when used_memory exceeds 85% of maxmemory.
+      Once Redis hits maxmemory it starts evicting keys based on
+      the eviction policy. For the cartservice this means losing
+      shopping carts — bad for business.
+    condition:
+      # this requires computing used_memory/maxmemory ratio
+      # in practice, use a Lens formula or ES|QL query
+      metric: redis.info.memory.used.value
+      comparator: ">"
+      threshold: 109051904  # 85% of 128MB (if maxmemory=128MB)
+      timeSize: 2
+      timeUnit: m
+      aggType: avg
+    actions:
+      - connector: webhook
+        message: |
+          🟡 Redis memory high
+          Used: {{ context.value }} bytes
+          Threshold: 85% of maxmemory
+          Action: Check for large keys with `redis-cli --bigkeys`
+
+  # --- Rule 7: High Redis Eviction Rate ---
+  - name: "Redis High Eviction Rate"
+    type: metrics.alert.threshold
+    description: >
+      Fires when evicted_keys increases by more than 100 in 5 minutes.
+      Any eviction in the cartservice Redis means we're losing shopping
+      carts. This should be 0 in normal operation.
+    condition:
+      metric: redis.info.stats.evicted_keys
+      comparator: ">"
+      threshold: 100
+      timeSize: 5
+      timeUnit: m
+      aggType: rate
+    actions:
+      - connector: webhook
+        message: |
+          🔴 Redis evicting keys!
+          Eviction rate: {{ context.value }} keys/5min
+          This means shopping carts are being lost.
+          Action: Increase maxmemory or scale Redis
+
+  # ========================================
+  # Section 3.3 — Network Policy
+  # ========================================
+
+  # --- Rule 8: Unexpected Egress Traffic ---
+  - name: "Unexpected Egress to Non-Allowlisted IPs"
+    type: custom.threshold
+    description: >
+      Fires when pods make outbound connections to IPs not in our
+      allowlist. This could indicate a compromised container
+      calling home, or a misconfigured service.
+    kql_query: >
+      event.action: "denied" AND
+      destination.ip: NOT (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)
+    timeSize: 5
+    timeUnit: m
+    threshold: 1
+    actions:
+      - connector: webhook
+        message: |
+          🔴 Unexpected egress traffic detected!
+          Source: {{ context.source.namespace }}/{{ context.source.pod }}
+          Destination: {{ context.destination.ip }}:{{ context.destination.port }}
+          Action: Investigate immediately — possible security incident
+
+  # ========================================
+  # Section 3.4 — NGINX Ingress
+  # ========================================
+
+  # --- Rule 9: 5xx Error Rate Spike ---
+  - name: "NGINX 5xx Error Rate > 5%"
+    type: custom.threshold
+    description: >
+      Fires when more than 5% of requests return 5xx over 2 minutes.
+      This catches both backend failures (502/503) and NGINX
+      configuration errors (500). The 2-minute window smooths out
+      isolated errors while still catching real outages quickly.
+    kql_query: >
+      nginx.status >= 500
+    timeSize: 2
+    timeUnit: m
+    # threshold as percentage of total requests
+    # implemented as ratio in Kibana: count(5xx) / count(all) > 0.05
+    actions:
+      - connector: webhook
+        message: |
+          🔴 High 5xx error rate from NGINX
+          Error rate: {{ context.value }}%
+          Window: 2 minutes
+          Check: kubectl logs -l app.kubernetes.io/name=ingress-nginx --tail=50
+
+  # --- Rule 10: Upstream Service Unavailable ---
+  - name: "NGINX Upstream Returning 502/503"
+    type: custom.threshold
+    description: >
+      Fires when NGINX gets 502 (Bad Gateway) or 503 (Service Unavailable)
+      from any upstream. This means a backend service is down or overloaded.
+      Different from 5xx rate — this targets specific upstream failures.
+    kql_query: >
+      nginx.upstream_status: (502 OR 503)
+    timeSize: 1
+    timeUnit: m
+    threshold: 5  # more than 5 upstream errors in 1 minute
+    actions:
+      - connector: webhook
+        message: |
+          🔴 Backend service unavailable
+          Upstream: {{ context.upstream_addr }}
+          Status: {{ context.upstream_status }}
+          Service: {{ context.service_name }}
+          Action: Check the backend pod health
+
+  # --- Rule 11: SSL Certificate Expiring Soon ---
+  - name: "SSL Certificate Expiry < 14 Days"
+    type: custom.threshold
+    description: >
+      Fires when any SSL certificate used by the ingress will expire
+      within 14 days. Two weeks gives us enough time to renew or
+      investigate cert-manager issues.
+    kql_query: >
+      nginx_ingress_controller_ssl_expire_time_seconds < 1209600
+    # 14 days = 14 * 86400 = 1,209,600 seconds
+    timeSize: 60
+    timeUnit: m
+    threshold: 1
+    actions:
+      - connector: webhook
+        message: |
+          🟡 SSL certificate expiring soon
+          Host: {{ context.host }}
+          Expires in: < 14 days
+          Action: Check cert-manager or manually renew
+
+# ========================================
+# Webhook Connector Configuration
+# ========================================
+#
+# Create in Kibana → Stack Management → Connectors → Create Connector → Webhook
+#
+# For the assessment, you can use a simple webhook receiver:
+#   - webhook.site (free, public — for testing only)
+#   - Or deploy a simple logging webhook in the cluster
+#
+# Config:
+#   Name: "SRE Alerts Webhook"
+#   URL: https://webhook.site/your-unique-url
+#   Method: POST
+#   Headers: Content-Type: application/json

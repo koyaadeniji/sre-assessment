@@ -1,0 +1,8 @@
+<!--
+  Add this inside <head> in src/frontend/templates/header.html
+
+  Update APM_SERVER_URL to your externally-accessible APM Server address.
+  (kubectl port-forward svc/apm-server-apm-http -n elastic-system 8200:8200)
+-->
+<script src="https://unpkg.com/@elastic/apm-rum@5.16.0/dist/bundles/elastic-apm-rum.umd.min.js" crossorigin="anonymous"></script>
+<script src="/static/rum-init.js"></script>

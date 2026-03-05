@@ -1,0 +1,30 @@
+# Redis Monitoring
+#
+# Redis is used by cartservice (redis-cart).
+# Add via: Kibana → Fleet → Agent Policies → Add Integration → Redis
+#
+# Connection:
+#   Host: redis-cart.online-boutique.svc.cluster.local:6379
+#   Password: (none — default Online Boutique Redis has no auth)
+#
+# Alternatively, standalone Metricbeat config below.
+
+metricbeat.modules:
+  - module: redis
+    enabled: true
+    metricsets: [info, keyspace]
+    hosts: ["redis-cart.online-boutique.svc.cluster.local:6379"]
+    period: 10s
+
+  - module: redis
+    enabled: true
+    metricsets: [slowlog]
+    hosts: ["redis-cart.online-boutique.svc.cluster.local:6379"]
+    period: 30s
+
+# Optional: set maxmemory so we can alert on usage %
+#   kubectl exec deploy/redis-cart -n online-boutique -- redis-cli CONFIG SET maxmemory 128mb
+
+# Viewing slow commands in Kibana:
+#   Discover → index: metrics-redis.slowlog-*
+#   Columns: redis.slowlog.cmd, redis.slowlog.duration.us, redis.slowlog.args

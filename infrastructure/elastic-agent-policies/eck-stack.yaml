@@ -1,0 +1,163 @@
+# Elastic Stack — ECK Deployment
+# Uses ECK defaults (TLS enabled, auto-generated certs).
+# Single-node Elasticsearch sized for assessment workloads.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elastic-system
+
+---
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: elasticsearch
+  namespace: elastic-system
+spec:
+  version: 8.12.0
+  nodeSets:
+    - name: default
+      count: 1
+      config:
+        node.store.allow_mmap: false
+      podTemplate:
+        spec:
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  memory: 2Gi
+                  cpu: 500m
+                limits:
+                  memory: 2Gi
+                  cpu: "1"
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms1g -Xmx1g"
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests:
+                storage: 10Gi
+
+---
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: kibana
+  namespace: elastic-system
+spec:
+  version: 8.12.0
+  count: 1
+  elasticsearchRef:
+    name: elasticsearch
+  podTemplate:
+    spec:
+      containers:
+        - name: kibana
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+
+---
+apiVersion: apm.k8s.elastic.co/v1
+kind: ApmServer
+metadata:
+  name: apm-server
+  namespace: elastic-system
+spec:
+  version: 8.12.0
+  count: 1
+  elasticsearchRef:
+    name: elasticsearch
+  kibanaRef:
+    name: kibana
+  config:
+    apm-server:
+      auth:
+        secret_token: "APM_SECRET_TOKEN"
+      rum:
+        enabled: true
+        allow_origins: ["*"]
+        allow_headers: [Content-Type, traceparent, tracestate]
+  podTemplate:
+    spec:
+      containers:
+        - name: apm-server
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+
+---
+# Fleet Server for managing Elastic Agents
+apiVersion: agent.k8s.elastic.co/v1alpha1
+kind: Agent
+metadata:
+  name: fleet-server
+  namespace: elastic-system
+spec:
+  version: 8.12.0
+  kibanaRef:
+    name: kibana
+  elasticsearchRefs:
+    - name: elasticsearch
+  mode: fleet
+  fleetServerEnabled: true
+  deployment:
+    replicas: 1
+    podTemplate:
+      spec:
+        serviceAccountName: fleet-server
+        automountServiceAccountToken: true
+        containers:
+          - name: agent
+            resources:
+              requests:
+                memory: 256Mi
+                cpu: 100m
+              limits:
+                memory: 512Mi
+                cpu: 250m
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-server
+  namespace: elastic-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-server
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, namespaces]
+    verbs: [get, watch, list]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet-server
+subjects:
+  - kind: ServiceAccount
+    name: fleet-server
+    namespace: elastic-system
+roleRef:
+  kind: ClusterRole
+  name: fleet-server
+  apiGroup: rbac.authorization.k8s.io

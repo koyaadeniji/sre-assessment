@@ -1,0 +1,31 @@
+# Kubernetes deployment patch for the instrumented frontend
+# Apply with: kubectl patch deployment frontend -n online-boutique --patch-file deployment-patch.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: online-boutique
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          # point to our instrumented image
+          image: sre-assessment/frontend:instrumented
+          env:
+            # tell the OTel SDK where to send data
+            # uses the downward API to get the node's IP — that's where the DaemonSet agent listens
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE_IP):4317"
+            - name: OTEL_SERVICE_NAME
+              value: "frontend"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.version=1.0.0,deployment.environment=assessment"
+            # W3C trace context propagation
+            - name: OTEL_PROPAGATORS
+              value: "tracecontext,baggage"

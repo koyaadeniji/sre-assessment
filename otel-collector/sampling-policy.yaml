@@ -1,0 +1,26 @@
+# Tail-Based Sampling Policy
+#
+# Implemented in values-gateway.yaml under the tail_sampling processor.
+# This file documents the reasoning.
+#
+# Why tail-based? Head-based sampling decides at trace start, so it can't
+# know if a request will error or be slow. Tail sampling waits for the
+# full trace, then decides. Trade-off: uses more memory at the gateway.
+#
+# Why at the gateway? If each agent sampled independently, spans from the
+# same trace could be split (one kept, one dropped) = broken traces.
+#
+# Policies (first match wins):
+#
+#   1. keep-all-errors         → 100% of traces with ERROR status
+#   2. keep-slow-traces        → 100% of traces > 2000ms
+#   3. keep-checkout-flow      → 100% of /cart/checkout and /cart requests
+#   4. probabilistic-sampling  → 10% of everything else
+#
+# Tuning:
+#   decision_wait: 10s  (longest trace is checkout at ~5s, 2x headroom)
+#   num_traces: 50000   (at 100 traces/sec * 10s = 1000 active, 50x buffer)
+#
+# Monitor the sampler via gateway metrics at :8888:
+#   otelcol_processor_tail_sampling_count_traces_sampled
+#   otelcol_processor_tail_sampling_count_traces_dropped

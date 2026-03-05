@@ -1,0 +1,35 @@
+# PostgreSQL Monitoring
+#
+# Add via: Kibana → Fleet → Agent Policies → Add Integration → PostgreSQL
+#
+# Connection:
+#   Host: postgres://postgresql.online-boutique.svc.cluster.local:5432/postgres
+#   Username: postgres
+#   Password: assessment123
+#   SSL: disable (internal traffic)
+#
+# Alternatively, standalone Metricbeat config below.
+
+metricbeat.modules:
+  - module: postgresql
+    enabled: true
+    metricsets: [database, bgwriter, activity, statement]
+    hosts: ["postgres://postgresql.online-boutique.svc.cluster.local:5432/postgres?sslmode=disable"]
+    username: "postgres"
+    password: "assessment123"
+    period: 10s
+
+# PostgreSQL server config needed for pg_stat_statements:
+#   shared_preload_libraries = 'pg_stat_statements'
+#   pg_stat_statements.track = all
+#   log_min_duration_statement = 500  (log queries > 500ms)
+#
+# Bitnami Helm values:
+#   postgresql.postgresqlExtendedConf.shared_preload_libraries: "pg_stat_statements"
+#   postgresql.initdbScripts:
+#     enable-extensions.sql: "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+
+# Finding top 5 slowest queries in Kibana:
+#   Discover → index: metrics-postgresql.statement-*
+#   KQL: postgresql.statement.query.calls > 0
+#   Sort: postgresql.statement.query.mean_time DESC

@@ -1,0 +1,24 @@
+{
+  "name": "paymentservice",
+  "version": "1.0.0",
+  "description": "Online Boutique payment service with OTel instrumentation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --require ./tracing.js index.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.0",
+    "pino": "^8.0.0",
+
+    "@opentelemetry/api": "^1.7.0",
+    "@opentelemetry/sdk-node": "^0.48.0",
+    "@opentelemetry/sdk-metrics": "^1.22.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.48.0",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.48.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.43.0",
+    "@opentelemetry/resources": "^1.22.0",
+    "@opentelemetry/semantic-conventions": "^1.22.0",
+    "@opentelemetry/core": "^1.22.0"
+  }
+}

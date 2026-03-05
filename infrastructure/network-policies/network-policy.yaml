@@ -1,0 +1,172 @@
+# =================================================================
+# Kubernetes Network Policies + Flow Log Monitoring
+# =================================================================
+#
+# Network policies restrict pod-to-pod traffic. Without them,
+# every pod can talk to every other pod — fine for dev, dangerous
+# for production.
+#
+# For the assessment we implement:
+# 1. Default deny all ingress (baseline security)
+# 2. Allow specific traffic patterns the Online Boutique needs
+# 3. Configure flow log collection for denied traffic visibility
+#
+# IMPORTANT: Network Policies require a CNI that supports them.
+# minikube with Calico: minikube start --cni=calico --nodes=2
+# If using default kubenet, network policies are created but not enforced.
+# =================================================================
+
+---
+# Default deny all ingress in the online-boutique namespace
+# This means: no pod can receive traffic unless explicitly allowed
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: online-boutique
+spec:
+  podSelector: {}  # applies to ALL pods in namespace
+  policyTypes:
+    - Ingress
+
+---
+# Allow frontend to receive traffic from the ingress controller
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-ingress
+  namespace: online-boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Allow frontend to talk to all backend services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backends
+  namespace: online-boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}  # any pod in same namespace
+      ports:
+        - protocol: TCP
+          port: 8080  # most services listen on 8080
+        - protocol: TCP
+          port: 50051  # gRPC services
+    # allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Allow cartservice to talk to Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cart-to-redis
+  namespace: online-boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: cartservice
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis-cart
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# Allow checkoutservice to talk to payment, shipping, email, currency, cart, productcatalog
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-checkout-to-backends
+  namespace: online-boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: checkoutservice
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}  # checkout talks to many services
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 50051
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+
+---
+# Allow all pods to reach the OTel Collector agent (for telemetry export)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otel-export
+  namespace: online-boutique
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # OTel agent runs on the node, accessible via hostPort
+    - ports:
+        - protocol: TCP
+          port: 4317  # OTLP gRPC
+        - protocol: TCP
+          port: 4318  # OTLP HTTP
+
+---
+# Allow pods to talk to Elastic Stack (for direct agent communication)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-elastic-stack
+  namespace: online-boutique
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: elastic-system
+      ports:
+        - protocol: TCP
+          port: 9200   # Elasticsearch
+        - protocol: TCP
+          port: 5601   # Kibana
+        - protocol: TCP
+          port: 8200   # APM Server
+        - protocol: TCP
+          port: 8220   # Fleet Server
