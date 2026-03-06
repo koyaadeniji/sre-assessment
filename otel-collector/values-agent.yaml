@@ -1,12 +1,6 @@
-# OpenTelemetry Collector — DaemonSet Agent
-# Runs on every node, collects telemetry from local pods + host metrics
-# Forwards everything to the central gateway for sampling and export
-
 mode: daemonset
 
-# -- the agent needs hostNetwork to scrape host-level metrics
-# and access the node's IP for pod-to-agent communication
-hostNetwork: true
+hostNetwork: false
 
 image:
   repository: otel/opentelemetry-collector-contrib
@@ -20,8 +14,6 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-# make the agent reachable from app pods via the node's IP
-# pods send OTLP to NODE_IP:4317
 ports:
   otlp:
     enabled: true
@@ -43,8 +35,6 @@ config:
         http:
           endpoint: 0.0.0.0:4318
 
-    # scrape host-level metrics from the node
-    # this gives us CPU, memory, disk, network per node
     hostmetrics:
       collection_interval: 30s
       scrapers:
@@ -63,8 +53,6 @@ config:
         processes: {}
 
   processors:
-    # prevent the agent from using too much memory
-    # if memory hits 80%, start dropping data — better than OOM
     memory_limiter:
       check_interval: 5s
       limit_mib: 400
@@ -75,8 +63,6 @@ config:
       send_batch_max_size: 2048
       timeout: 5s
 
-    # enrich every span/metric/log with k8s metadata
-    # this is critical — without it, traces show up in Kibana without pod/namespace info
     k8sattributes:
       auth_type: "serviceAccount"
       passthrough: false
@@ -99,7 +85,6 @@ config:
         - sources:
             - from: connection
 
-    # add resource info about the node itself
     resourcedetection:
       detectors: [env, system]
       system:
@@ -107,8 +92,6 @@ config:
       timeout: 5s
 
   exporters:
-    # forward all signals to the gateway — NOT directly to Elastic
-    # the gateway handles sampling and final export
     otlp/gateway:
       endpoint: otel-gateway-opentelemetry-collector.online-boutique.svc.cluster.local:4317
       tls:
@@ -147,9 +130,8 @@ config:
       logs:
         level: info
       metrics:
-        address: 0.0.0.0:8888
+        level: none
 
-# need RBAC so the k8sattributes processor can query the k8s API
 clusterRole:
   create: true
   rules:

@@ -1,12 +1,3 @@
-# OpenTelemetry Collector — Gateway (Deployment)
-# Central collector that receives from all DaemonSet agents
-# Handles tail-based sampling and exports to Elastic APM Server
-#
-# Why a separate gateway?
-# - Tail sampling needs to see ALL spans for a trace before deciding
-# - If agents sampled independently, we'd get broken traces
-# - Gateway is the single point that has the full picture
-
 mode: deployment
 
 replicaCount: 1
@@ -23,6 +14,13 @@ resources:
     cpu: 250m
     memory: 256Mi
 
+extraEnvs:
+  - name: APM_SECRET_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: apm-token
+        key: token
+
 config:
   receivers:
     otlp:
@@ -31,9 +29,6 @@ config:
           endpoint: 0.0.0.0:4317
         http:
           endpoint: 0.0.0.0:4318
-
-    # some services might still emit Zipkin format
-    # keeping this open for backward compat — costs nothing
     zipkin:
       endpoint: 0.0.0.0:9411
 
@@ -48,15 +43,6 @@ config:
       send_batch_max_size: 4096
       timeout: 10s
 
-    # --- this is the key piece ---
-    # tail sampling at the gateway means we see the full trace
-    # before deciding whether to keep or drop it
-    #
-    # policy logic:
-    #   1. always keep errors (these are what we care about most)
-    #   2. always keep slow requests (>2s — something is wrong)
-    #   3. always keep checkout/payment flows (business-critical)
-    #   4. sample 10% of everything else (keep costs manageable)
     tail_sampling:
       decision_wait: 10s
       num_traces: 50000
@@ -84,86 +70,53 @@ config:
           probabilistic:
             sampling_percentage: 10
 
-    # add cluster-level metadata that the agents don't have
     resource:
       attributes:
         - key: deployment.environment
           value: "assessment"
           action: upsert
         - key: k8s.cluster.name
-          value: "sre-assessment"
+          value: "minikube"
           action: upsert
 
   exporters:
-    # send everything to Elastic APM Server via OTLP
-    # APM Server routes signals to the right Elasticsearch indices:
-    #   traces → traces-apm-*
-    #   metrics → metrics-apm-*
-    #   logs → logs-apm-*
-    otlp/elastic:
-      endpoint: "apm-server-apm-http.elastic-system.svc.cluster.local:8200"
+    otlphttp/elastic:
+      endpoint: "https://apm-server-apm-http.elastic-system.svc.cluster.local:8200"
       tls:
-        insecure: false
-        ca_file: /etc/ssl/certs/elastic-ca.pem
+        insecure_skip_verify: true
       headers:
-        # references the APM secret token from a k8s secret
-        # create with: kubectl create secret generic apm-token --from-literal=token=YOUR_TOKEN -n online-boutique
         Authorization: "Bearer ${APM_SECRET_TOKEN}"
-
-# mount the APM secret token as an env var on the gateway pod
-extraEnvs:
-  - name: APM_SECRET_TOKEN
-    valueFrom:
-      secretKeyRef:
-        name: apm-token
-        key: token
-
-# mount the Elastic CA cert so the gateway can verify the APM server's TLS
-extraVolumes:
-  - name: elastic-ca
-    secret:
-      secretName: elasticsearch-es-http-ca-internal
-extraVolumeMounts:
-  - name: elastic-ca
-    mountPath: /etc/ssl/certs/elastic-ca.pem
-    subPath: ca.crt
-    readOnly: true
 
   extensions:
     health_check:
       endpoint: 0.0.0.0:13133
     zpages:
       endpoint: 0.0.0.0:55679
-    pprof:
-      endpoint: 0.0.0.0:1777
 
   service:
-    extensions: [health_check, zpages, pprof]
+    extensions: [health_check, zpages]
 
     pipelines:
-      # traces get tail sampling — this is why they go through the gateway
       traces:
         receivers: [otlp, zipkin]
         processors: [memory_limiter, tail_sampling, resource, batch]
-        exporters: [otlp/elastic]
+        exporters: [otlphttp/elastic]
 
-      # metrics don't need sampling, just enrichment and batching
       metrics:
         receivers: [otlp]
         processors: [memory_limiter, resource, batch]
-        exporters: [otlp/elastic]
+        exporters: [otlphttp/elastic]
 
-      # logs get the same treatment as metrics
       logs:
         receivers: [otlp]
         processors: [memory_limiter, resource, batch]
-        exporters: [otlp/elastic]
+        exporters: [otlphttp/elastic]
 
     telemetry:
       logs:
         level: info
       metrics:
-        address: 0.0.0.0:8888
+        level: none
 
 serviceAccount:
   create: true
